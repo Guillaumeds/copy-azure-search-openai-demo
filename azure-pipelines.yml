@@ -1,0 +1,103 @@
+# Azure Pipelines configuration for Azure Search OpenAI Demo
+# 🧪 SANDBOX DEPLOYMENT - Deploying to innovation sandbox environment (F1 tier)
+# This pipeline builds Reac t frontend + Python backend and deploys to Azure Web App
+
+trigger:
+  branches:
+    include:
+    - main
+
+pool:
+  name: 'Default'  # 🖥️ Self-hosted agent pool
+
+variables:
+  pythonVersion: '3.11'
+  nodeVersion: '20.x'
+  
+  # Sandbox Environment Configuration
+  azureWebAppName: 'agi-eusc-webapp-rag-inovsbx'  # Sweden Central sandbox Web App
+  azureServiceConnection: 'azure-webapp-sbx-connection'  # ✅ Service connection created
+
+stages:
+- stage: Build
+  displayName: 'Build Application'
+  jobs:
+  - job: BuildApp
+    displayName: 'Build Frontend + Backend'
+    steps:
+    
+    # Install Node.js for React frontend build
+    - task: NodeTool@0
+      inputs:
+        versionSpec: '$(nodeVersion)'
+      displayName: 'Install Node.js $(nodeVersion)'
+    
+    # Build React frontend (outputs to app/backend/static for serving)
+    - script: |
+        cd app/frontend
+        npm install
+        npm run build
+      displayName: 'Build React frontend'
+    
+    # Install Python runtime
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Use Python $(pythonVersion)'
+    
+    # Install Python backend dependencies from app/backend/requirements.txt
+    - script: |
+        cd app/backend
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      displayName: 'Install Python dependencies'
+    
+    # Archive ONLY the backend folder (includes built frontend static files)
+    - task: ArchiveFiles@2
+      displayName: 'Archive backend folder'
+      inputs:
+        rootFolderOrFile: '$(Build.SourcesDirectory)/app/backend'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+        replaceExistingArchive: true
+    
+    # Publish build artifacts for deployment stage
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish artifacts'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'drop'
+
+- stage: DeployToSandbox
+  displayName: 'Deploy to Sandbox Environment'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+  - deployment: DeployWebAppSandbox
+    displayName: 'Deploy to Sandbox Web App'
+    environment: 'sandbox'  # 🧪 Sandbox environment (not production)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          
+          # Download build artifacts from Build stage
+          - task: DownloadBuildArtifacts@1
+            displayName: 'Download artifacts'
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'drop'
+              downloadPath: '$(System.ArtifactsDirectory)'
+          
+          # Deploy to Azure Web App in sandbox (Sweden Central, F1 tier)
+          - task: AzureWebApp@1
+            displayName: 'Deploy to Sandbox Web App'
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              appType: 'webAppLinux'
+              appName: '$(azureWebAppName)'
+              package: '$(System.ArtifactsDirectory)/drop/$(Build.BuildId).zip'
+              runtimeStack: 'PYTHON|3.11'
+              startUpCommand: 'python3 -m gunicorn main:app'
